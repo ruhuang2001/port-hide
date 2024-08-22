@@ -13,7 +13,7 @@ g++ -std=c++11 port_knocker.cpp -o port_knocker -pthread
 
 另外开一个终端
 ```
-echo -n "wrong" | nc -u localhost 12345
+echo -n "secret" | nc -u localhost 12345
 nc localhost 7897
 
 # 然后输入你想传入的内容回车
@@ -21,6 +21,19 @@ nc localhost 7897
 ```
 
 ## 开发过程
+
+### v1.0
+
+考虑到对网络编程不是特别熟悉，所以第一版先能跑通最重要：）
+
+根据端口隐藏的概念，设计了一个简单的程序，实现大致流程如下：
+1. 启动UDP监听器，等待敲门数据包。
+2. 当接收到正确的敲门数据包后，启动TCP服务器并开放指定端口。
+3. 仅允许发送了正确敲门包的客户端连接到TCP服务器。
+4. 在TCP连接建立后，处理客户端请求并返回响应信息。
+
+效果图
+![v1效果图](./img/runVersion1.png)
 
 ## 参考资料
 
