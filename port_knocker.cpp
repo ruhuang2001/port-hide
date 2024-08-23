@@ -1,6 +1,5 @@
 #include <iostream>
 #include <thread>
-#include <mutex>
 #include <cstring>
 #include <unistd.h>
 #include <arpa/inet.h>
@@ -8,8 +7,6 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 
-// 互斥锁，用于保护共享资源
-std::mutex mtx;
 
 // 处理客户端连接的函数
 void handle_client(int client_socket) {
@@ -72,8 +69,6 @@ void tcp_server(uint16_t port, sockaddr_in client_addr) {
             close(server_fd);
             exit(EXIT_FAILURE);
         }
-
-        std::lock_guard<std::mutex> lock(mtx);
         
         // 检查连接是否来自允许的客户端
         if (address.sin_addr.s_addr == client_addr.sin_addr.s_addr) {
@@ -133,7 +128,6 @@ void udp_listener(uint16_t udp_port, uint16_t tcp_port, const std::string& secre
         // 检查是否收到正确的敲门序列
         if (received_knock == secret_knock) {
             std::cout << "收到合法敲门包，开放TCP端口 " << tcp_port << " 给客户端" << std::endl;
-            std::lock_guard<std::mutex> lock(mtx);
             // 为新的TCP服务器创建一个新线程
             std::thread(tcp_server, tcp_port, cliaddr).detach();
         } else {

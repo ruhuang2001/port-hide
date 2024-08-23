@@ -35,8 +35,12 @@ nc localhost 7897
 效果图
 ![v1效果图](./img/runVersion1.png)
 
-## 参考资料
+## 参考学习资料
 
-https://en.wikipedia.org/wiki/Port_knocking
+[YouTube@Eric O Meehan -- Creating a Web Server from Scratch in C](https://www.youtube.com/watch?v=gk6NL1pZi1M)
 
-https://www.cnblogs.com/milton/p/14121214.html
+[YouTube@Nicholas Day -- C++ Network Programming Part 1: Sockets ](https://www.youtube.com/watch?v=gntyAFoZp-E)
+
+[Wiki: Port knocking](https://en.wikipedia.org/wiki/Port_knocking)
+
+[Jack Huang: C++高性能网络编程](https://huangwang.github.io/2019/10/26/CPlusPlus%E9%AB%98%E6%80%A7%E8%83%BD%E7%BD%91%E7%BB%9C%E7%BC%96%E7%A8%8B/)
