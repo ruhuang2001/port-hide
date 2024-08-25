@@ -7,9 +7,32 @@
 #include <net/if.h>
 #include <sys/socket.h>
 #include <sys/types.h>
-#include <bpf/libbpf.h>
 #include <linux/bpf.h>
+
+// 由于内核和BPF版本问题，简陋的解决bpf_stats_type报错的方法
+enum bpf_stats_type {
+    BPF_STATS_RUN_TIME = 0,
+};
+#include <bpf/bpf.h>
+
+#include <bpf/libbpf.h>
 #include <linux/if_link.h>
+
+#define MAP_PATH "/sys/fs/bpf/tc/globals/allowed_clients"
+
+// 用于存储打开的 eBPF 映射文件描述符
+int bpf_map_fd = -1;
+
+// 检查客户端是否在允许列表中
+bool is_client_allowed(const struct sockaddr_in& client_addr) {
+    __be32 client_ip = client_addr.sin_addr.s_addr;
+    __u32 value;
+    
+    if (bpf_map_lookup_elem(bpf_map_fd, &client_ip, &value) == 0) {
+        return true;
+    }
+    return false;
+}
 
 // 处理客户端连接的函数
 void handle_client(int client_socket) {
@@ -68,11 +91,55 @@ void attach_xdp_program(const char *ifname) {
         return;
     }
 
+    // 固定 eBPF 映射到指定路径
+    struct bpf_map *map = bpf_object__find_map_by_name(obj, "allowed_clients");
+    if (!map) {
+        perror("Failed to find BPF map");
+        bpf_object__close(obj);
+        return;
+    }
+    int map_fd = bpf_map__fd(map);
+    if (map_fd < 0) {
+        perror("Failed to get BPF map fd");
+        bpf_object__close(obj);
+        return;
+    }
+    if (bpf_obj_pin(map_fd, MAP_PATH) < 0) {
+        perror("Failed to pin BPF map");
+        bpf_object__close(obj);
+        return;
+    }
+
     std::cout << "成功将XDP程序附加到接口 " << ifname << std::endl;
 }
 
+// 初始化XDP程序
+void initialize_xdp(const char* interface) {
+    if (access(MAP_PATH, F_OK) != -1) {
+        if (bpf_obj_get(MAP_PATH) >= 0) {
+            unlink(MAP_PATH); // 删除旧的固定点
+        }
+    }
+    attach_xdp_program(interface);
+}
+
+// 等待正确的敲门包
+bool wait_for_knock(int map_fd) {
+    std::cout << "等待正确的敲门包以启动服务器..." << std::endl;
+    while (true) {
+        __be32 next_key;
+        if (bpf_map_get_next_key(map_fd, nullptr, &next_key) == 0) {
+            std::cout << "检测到正确的敲门包，准备启动服务器..." << std::endl;
+            return true;
+        } else {
+            std::cout << "未检测到正确的敲门包，继续等待..." << std::endl;
+        }
+        sleep(1);
+    }
+}
+
 // TCP服务器函数
-void tcp_server(uint16_t port, sockaddr_in client_addr) {
+void tcp_server(uint16_t port) {
     int server_fd, new_socket;
     struct sockaddr_in address;
     int opt = 1;
@@ -83,11 +150,10 @@ void tcp_server(uint16_t port, sockaddr_in client_addr) {
         perror("socket failed");
         exit(EXIT_FAILURE);
     }
-
+    
     // 设置socket选项，允许地址重用
     if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt, sizeof(opt))) {
         perror("setsockopt failed");
-        close(server_fd);
         exit(EXIT_FAILURE);
     }
 
@@ -98,34 +164,32 @@ void tcp_server(uint16_t port, sockaddr_in client_addr) {
     // 绑定socket到指定端口
     if (bind(server_fd, (struct sockaddr*)&address, sizeof(address)) < 0) {
         perror("bind failed");
-        close(server_fd);
         exit(EXIT_FAILURE);
     }
 
     // 开始监听连接
     if (listen(server_fd, 3) < 0) {
         perror("listen failed");
-        close(server_fd);
         exit(EXIT_FAILURE);
     }
 
-    std::cout << "TCP 端口 " << port << " 已开放，仅对指定客户端可用" << std::endl;
+    std::cout << "TCP 端口 " << port << " 已开放，仅对已认证的客户端可用" << std::endl;
 
     while (true) {
-        // 接受新的连接
-        if ((new_socket = accept(server_fd, (struct sockaddr*)&address, (socklen_t*)&addrlen)) < 0) {
+        struct sockaddr_in client_addr;
+        socklen_t client_addrlen = sizeof(client_addr);
+        new_socket = accept(server_fd, (struct sockaddr*)&client_addr, &client_addrlen);
+        if (new_socket < 0) {
             perror("accept failed");
-            close(server_fd);
-            exit(EXIT_FAILURE);
+            continue;
         }
         
         // 检查连接是否来自允许的客户端
-        if (address.sin_addr.s_addr == client_addr.sin_addr.s_addr) {
-            std::cout << "客户端连接成功" << std::endl;
-            // 为新的客户端连接创建一个新线程
+        if (is_client_allowed(client_addr)) {
+            std::cout << "允许的客户端连接成功: " << inet_ntoa(client_addr.sin_addr) << std::endl;
             std::thread(handle_client, new_socket).detach();
         } else {
-            std::cout << "拒绝非法客户端连接" << std::endl;
+            std::cout << "拒绝非法客户端连接: " << inet_ntoa(client_addr.sin_addr) << std::endl;
             close(new_socket);
         }
     }
@@ -133,74 +197,27 @@ void tcp_server(uint16_t port, sockaddr_in client_addr) {
     close(server_fd);
 }
 
-// UDP监听器函数
-void udp_listener(uint16_t udp_port, uint16_t tcp_port, const std::string& secret_knock) {
-    int sockfd;
-    char buffer[1024];
-    struct sockaddr_in servaddr, cliaddr;
-
-    // 创建UDP socket
-    if ((sockfd = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
-        perror("socket creation failed");
-        exit(EXIT_FAILURE);
-    }
-
-    memset(&servaddr, 0, sizeof(servaddr));
-    memset(&cliaddr, 0, sizeof(cliaddr));
-
-    servaddr.sin_family = AF_INET;
-    servaddr.sin_addr.s_addr = INADDR_ANY;
-    servaddr.sin_port = htons(udp_port);
-
-    // 绑定socket到指定端口
-    if (bind(sockfd, (const struct sockaddr*)&servaddr, sizeof(servaddr)) < 0) {
-        perror("bind failed");
-        close(sockfd);
-        exit(EXIT_FAILURE);
-    }
-
-    socklen_t len;
-    int n;
-    len = sizeof(cliaddr);
-
-    while (true) {
-        // 接收UDP数据
-        n = recvfrom(sockfd, buffer, 1024, 0, (struct sockaddr*)&cliaddr, &len);
-        std::cout << "收到的敲门数据: " << buffer << std::endl;
-        if (n < 0) {
-            perror("recvfrom failed");
-            continue; // 发生错误时跳过本次循环，继续监听
-        }
-        buffer[n] = '\0';
-        std::string received_knock(buffer);
-
-        // 检查是否收到正确的敲门序列
-        if (received_knock == secret_knock) {
-            std::cout << "收到合法敲门包，开放TCP端口 " << tcp_port << " 给客户端" << std::endl;
-            // 为新的TCP服务器创建一个新线程
-            std::thread(tcp_server, tcp_port, cliaddr).detach();
-        } else {
-            std::cout << "收到非法敲门包，忽略。" << std::endl;
-        }
-    }
-}
-
 int main() {
     const char *interface = "lo"; // 替换为你实际使用的网络接口名称
-    uint16_t udp_port = 12345; // 监听的 UDP 端口
     uint16_t tcp_port = 7897;  // 需要开放的 TCP 端口
-    std::string secret_knock = "secret"; // 敲门包的内容
 
-    // 将XDP程序附加到指定的网络接口
-    attach_xdp_program(interface);
+    // 初始化XDP程序
+    initialize_xdp(interface);
 
-    // 启动UDP监听器线程
-    std::thread(udp_listener, udp_port, tcp_port, secret_knock).detach();
-
-    // 主线程保持运行
-    while (true) {
-        std::this_thread::sleep_for(std::chrono::minutes(1));
+    // 打开 eBPF map
+    bpf_map_fd = bpf_obj_get(MAP_PATH);
+    if (bpf_map_fd < 0) {
+        perror("Failed to open eBPF map");
+        exit(EXIT_FAILURE);
     }
 
+    // 等待正确的敲门包
+    if (wait_for_knock(bpf_map_fd)) {
+        // 启动TCP服务器
+        std::cout << "敲门成功，启动TCP服务器..." << std::endl;
+        tcp_server(tcp_port);
+    }
+
+    close(bpf_map_fd);
     return 0;
 }
