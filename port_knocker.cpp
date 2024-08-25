@@ -4,9 +4,12 @@
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <net/if.h>
 #include <sys/socket.h>
 #include <sys/types.h>
-
+#include <bpf/libbpf.h>
+#include <linux/bpf.h>
+#include <linux/if_link.h>
 
 // 处理客户端连接的函数
 void handle_client(int client_socket) {
@@ -21,6 +24,51 @@ void handle_client(int client_socket) {
     
     // 关闭客户端socket
     close(client_socket);
+}
+
+// 将XDP程序附加到指定的网络接口上
+void attach_xdp_program(const char *ifname) {
+    struct bpf_object *obj;
+    int prog_fd;
+    int ifindex;
+    
+    // 获取网卡接口索引
+    ifindex = if_nametoindex(ifname);
+    if (ifindex == 0) {
+        perror("Failed to get ifindex");
+        return;
+    }
+
+    // 打开编译好的eBPF程序对象文件
+    obj = bpf_object__open_file("udp_filter.o", nullptr);
+    if (!obj) {
+        perror("Failed to open BPF object file");
+        return;
+    }
+
+    // 加载eBPF程序到内核
+    if (bpf_object__load(obj)) {
+        perror("Failed to load BPF object");
+        bpf_object__close(obj);
+        return;
+    }
+
+    // 获取名为"udp_filter"的eBPF程序的文件描述符
+    prog_fd = bpf_program__fd(bpf_object__find_program_by_name(obj, "udp_filter"));
+    if (prog_fd < 0) {
+        perror("Failed to find BPF program");
+        bpf_object__close(obj);
+        return;
+    }
+
+    // 将eBPF程序附加到网卡接口
+    if (bpf_set_link_xdp_fd(ifindex, prog_fd, 0) < 0) {
+        perror("Failed to attach XDP program to interface");
+        bpf_object__close(obj);
+        return;
+    }
+
+    std::cout << "成功将XDP程序附加到接口 " << ifname << std::endl;
 }
 
 // TCP服务器函数
@@ -39,6 +87,7 @@ void tcp_server(uint16_t port, sockaddr_in client_addr) {
     // 设置socket选项，允许地址重用
     if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt, sizeof(opt))) {
         perror("setsockopt failed");
+        close(server_fd);
         exit(EXIT_FAILURE);
     }
 
@@ -137,9 +186,13 @@ void udp_listener(uint16_t udp_port, uint16_t tcp_port, const std::string& secre
 }
 
 int main() {
+    const char *interface = "lo"; // 替换为你实际使用的网络接口名称
     uint16_t udp_port = 12345; // 监听的 UDP 端口
     uint16_t tcp_port = 7897;  // 需要开放的 TCP 端口
     std::string secret_knock = "secret"; // 敲门包的内容
+
+    // 将XDP程序附加到指定的网络接口
+    attach_xdp_program(interface);
 
     // 启动UDP监听器线程
     std::thread(udp_listener, udp_port, tcp_port, secret_knock).detach();
