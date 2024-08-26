@@ -48,7 +48,7 @@ int udp_filter(struct xdp_md *ctx) {
 
     // 检查是否在拒绝列表中
     __u32 *is_denied = bpf_map_lookup_elem(&denied_clients, &ip->saddr);
-    if (is_denied && *is_denied > MAX_FAILURES) {
+    if (is_denied && *is_denied >= MAX_FAILURES) {
         return XDP_DROP;  // 如果在拒绝列表中，直接丢弃数据包
     }
 
@@ -69,16 +69,19 @@ int udp_filter(struct xdp_md *ctx) {
     // 检查 UDP 载荷数据的起始位置
     char *payload = (char *)(udp + 1);
     int payload_len = data_end - (void *)payload;
-    if (payload_len != sizeof(SECRET_KNOCK) - 1)
-        return XDP_PASS;  // 如果载荷长度不匹配，直接通过
 
     // 手动比较载荷内容和 SECRET_KNOCK 定义的密钥
     bool match = true;
-    for (int i = 0; i < sizeof(SECRET_KNOCK) - 1; i++) {
-        // 在每次访问前检查是否越界
-        if ((void *)(payload + i + 1) > data_end || payload[i] != SECRET_KNOCK[i]) {
-            match = false;
-            break;
+    // 长度不同直接不匹配
+    if (payload_len != sizeof(SECRET_KNOCK) - 1) {
+        match = false;
+    } else {
+        for (int i = 0; i < sizeof(SECRET_KNOCK) - 1; i++) {
+            // 在每次访问前检查是否越界
+            if ((void *)(payload + i + 1) > data_end || payload[i] != SECRET_KNOCK[i]) {
+                match = false;
+                break;
+            }
         }
     }
 
@@ -92,6 +95,7 @@ int udp_filter(struct xdp_md *ctx) {
          __u32 *fail_count = bpf_map_lookup_elem(&denied_clients, &ip->saddr);
         if (fail_count) {
             *fail_count += 1;
+            bpf_map_update_elem(&denied_clients, &ip->saddr, fail_count, BPF_ANY); // 写回更新后的值
         } else {
             __u32 initial_fail_count = 1;
             bpf_map_update_elem(&denied_clients, &ip->saddr, &initial_fail_count, BPF_ANY);

@@ -58,6 +58,8 @@ nc localhost 7897
 ```
 git clone <this_repository_url>
 cd port-hide
+# 创建存储eBPF map的文件夹
+sudo mkdir -p /sys/fs/bpf/tc/globals
 clang -O2 -target bpf -g -D__TARGET_ARCH_x86 -c udp_filter.c -o udp_filter.o
 g++ -o port_knocker port_knocker.cpp -lbpf -lpthread
 # eBPF程序需要足够的权限
@@ -75,6 +77,32 @@ nc localhost 7897
 
 效果图
 ![v2效果图](./img/runVersion2.png)
+
+### v2.1
+
+这个版本主要在v2.0版本的基础上解决了暴力破解的问题，在udp_filter.c中添加了一个新的哈希表用于存储标记拒绝的客户端的IP，当发现有客户端连续三次在指定UDP端口上失败后就彻底拉黑这个ip传入的敲门包，即便是后续用正确密钥也无法打开TCP端口。
+
+另外在port_knocker.cpp中添加了实时一个记录成功失败的客户端ip地址的功能，能够在程序运行过程中记录和查看通过和被拉黑的客户端IP地址。
+
+至此，demo核心需求基本实现了，当然由于时间和水平问题，还有很多的地方值得优化：
+- 程序运行日志，方便出错定位
+- port_knock.cpp的架构设计，按这个写下去迟早shi山
+- 密钥是明文，这个存在被破解的可能性
+- UDP端口固定，不确定是否有一种方法能随机端口呢？
+- ...
+
+得今后有空再具体实现了）
+
+#### 使用方法
+
+具体使用方法同v2.0，考虑篇幅只放展示效果图。
+
+三次尝试后被拒绝的效果
+![v2.1拒绝效果图](./img/runVersion2_1_denied.png)
+
+成功效果图, 图二是临时开的服务器测试TCP端口打开非认证的客户端是否可用。
+![v2.1成功效果图-认证客户端](./img/runVersion2_1_allowed.png)
+![v2.1成功效果图-非认证客户端](./img/runVersion2_1_allowed2.png)
 
 ## 参考学习资料
 
